@@ -1,0 +1,12 @@
+# Ficheros de RStudio y de la sesión de R
+.Rproj.user
+.Rhistory
+.RData
+.Ruserdata
+
+# Viñetas compiladas y resultados de compilar o comprobar el paquete
+inst/doc
+doc
+Meta
+*.tar.gz
+*.Rcheck/
