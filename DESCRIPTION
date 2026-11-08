@@ -1,0 +1,38 @@
+Package: dataprepR
+Type: Package
+Title: Herramientas Básicas para el Preprocesado de Datasets
+Version: 1.0.1
+Author: Alazne Valencia Saez
+Maintainer: Alazne Valencia Saez <avalencia024@ikasle.ehu.eus>
+Description: Paquete para el preprocesado de bases de datos desarrollado para la
+    asignatura Software Matemático y Estadístico. Incluye implementaciones propias
+    de la discretización por igual anchura e igual frecuencia, la entropía, el
+    AUC, la correlación y la información mutua, y funciones para calcular las
+    métricas de cada variable según su tipo (varianza, AUC y entropía),
+    normalizar y estandarizar, filtrar variables y dibujar varios gráficos,
+    además de una clase S3 para gestionar datasets y funciones de lectura y
+    escritura en CSV y en un formato propio.
+License: GPL (>= 2)
+Encoding: UTF-8
+Imports:
+    stats,
+    graphics,
+    grDevices,
+    utils
+Suggests:
+    knitr,
+    rmarkdown
+BuildVignettes: TRUE
+VignetteBuilder: knitr
+RoxygenNote: 7.3.3
+Collate:
+    'utils.R'
+    'dataset.R'
+    'discretization.R'
+    'metrics.R'
+    'normalization.R'
+    'filtering.R'
+    'correlation.R'
+    'plotting.R'
+    'io.R'
+    'dataprepR-package.R'

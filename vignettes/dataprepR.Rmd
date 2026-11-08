@@ -1,0 +1,679 @@
+---
+title: "Preprocesado de datasets con dataprepR"
+author: "Alazne Valencia Saez"
+date: "Noviembre de 2026"
+output:
+  rmarkdown::html_vignette:
+    toc: true
+vignette: >
+  %\VignetteIndexEntry{Preprocesado de datasets con dataprepR}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+```{r setup, include = FALSE}
+knitr::opts_chunk$set(
+  collapse = TRUE,
+  comment = "#>",
+  fig.width = 7,
+  fig.height = 4.5,
+  fig.align = "center"
+)
+```
+
+## Introducción
+
+**dataprepR** es un paquete con herramientas básicas para preprocesar bases de
+datos. Los algoritmos principales (discretización, entropía, AUC, correlación
+e información mutua) están implementados a mano con las funciones básicas de
+R, sin depender de otros paquetes. Para la varianza y la desviación típica se
+usan directamente las funciones `var` y `sd` de R. Los gráficos se hacen con
+las funciones gráficas de R base (`plot`, `barplot` e `image`).
+
+Las funciones del paquete se agrupan por funcionalidades. La última columna
+indica el apartado de esta viñeta en el que se muestra cada grupo:
+
+| Funcionalidad | Funciones | Apartado |
+|:--------------|:----------|:---------|
+| Discretización | `discretize`, `discretizeEW`, `discretizeEF`, `discretizeData` | 3 |
+| Métricas | `entropy`, `calculateAUC`, `computeMetrics` | 4 |
+| Normalización y estandarización | `normalize`, `standardize`, `normalizeData`, `standardizeData` | 5 |
+| Filtrado de variables | `filterData` | 6 |
+| Correlación e información mutua | `correlation`, `mutualInformation`, `computeCorrelations` | 7 |
+| Visualización | `plotROC`, `plotAUC`, `plotCorrelation`, `plotEntropy` | 3.4, 4.2, 4.3 y 7 |
+| Gestión de datasets | `readCSV`, `createDataset`, `isDataset`, `print`, `summary`, `writeDataset`, `readDataset` | 1, 2 y 8 |
+
+Las funciones que trabajan con un dataset completo aceptan un `data.frame`, una
+matriz o un objeto de la clase `dataset` del propio paquete. En esta viñeta
+vamos a ver cómo se usa cada una de ellas.
+
+Para instalar el paquete basta con el fichero `.tar.gz`, desde la consola de R
+o desde RStudio (*Tools > Install Packages*):
+
+```{r, eval = FALSE}
+install.packages("dataprepR_1.0.1.tar.gz", repos = NULL, type = "source")
+```
+
+Una vez instalado, cargamos el paquete:
+
+```{r}
+library(dataprepR)
+```
+
+## 1. Lectura de los datos
+
+Como ejemplo usaremos el conjunto de datos `mtcars`, que viene con R. Tiene
+información de 32 coches: consumo (`mpg`), número de cilindros (`cyl`),
+potencia (`hp`), peso (`wt`), tipo de motor (`vs`), tipo de cambio (`am`, 0 =
+automático y 1 = manual), etc. Para simular un caso real, primero lo guardamos
+en un fichero CSV.
+
+```{r}
+fichero.csv <- tempfile(fileext = ".csv")
+write.csv(mtcars, fichero.csv, row.names = FALSE)
+```
+
+Si leemos el fichero con `read.csv`, todas las columnas son numéricas, aunque
+algunas (como `cyl` o `am`) son claramente categóricas. La función `readCSV`
+mira los valores de cada columna y le asigna el tipo adecuado: `factor` si
+tiene menos de `max.categories` valores distintos, `integer` si todos son
+enteros, `numeric` si son números reales y `character` en otro caso.
+
+```{r}
+coches <- readCSV(fichero.csv, max.categories = 5)
+sapply(coches, class)
+```
+
+Las variables `cyl`, `vs`, `am` y `gear` tienen menos de 5 valores distintos y
+se han leído como factores. `hp` y `carb` tienen más valores, pero todos son
+enteros, así que se han leído como `integer`. El resto son números reales
+(`numeric`). Para que los resultados se entiendan mejor, ponemos
+nombres a los niveles de la variable `am`, que usaremos como variable clase:
+
+```{r}
+levels(coches$am) <- c("automatico", "manual")
+table(coches$am)
+```
+
+La regla de `readCSV` es aproximada: una variable numérica con pocos valores
+distintos se leería como factor, y una categoría codificada con muchos números
+distintos, como numérica. Las funciones del paquete trabajan con el tipo que
+tiene cada columna en R, así que, si hace falta, se puede corregir a mano. Por
+ejemplo, en `mtcars` el número de cilindros está guardado como número, y para
+tratarlo como una variable categórica basta con convertirlo en factor:
+
+```{r}
+datos <- mtcars
+class(datos$cyl)
+datos$cyl <- factor(datos$cyl)
+class(datos$cyl)
+```
+
+## 2. La clase `dataset`
+
+Para trabajar con los datos de forma cómoda, el paquete define una clase S3
+llamada `dataset` que agrupa el `data.frame` con el nombre de su variable clase
+y un nombre descriptivo. Se crea con `createDataset`:
+
+```{r}
+ds <- createDataset(coches, class.name = "am", name = "Coches (mtcars)")
+isDataset(ds)
+```
+
+Gracias a las funciones genéricas de R, al imprimir el objeto se usa el método
+`print.dataset`, que muestra un resumen de su contenido:
+
+```{r}
+ds
+```
+
+Internamente es una lista con tres elementos (`data`, `class.name` y `name`),
+así que podemos acceder a ellos con `$`:
+
+```{r}
+ds$class.name
+dim(ds$data)
+```
+
+El tipo de cada variable es el tipo de su columna en `data`: `numeric` o
+`integer` para las numéricas, `factor` o `logical` para las categóricas y
+`character` para los textos.
+
+La ventaja de usar esta clase es que las funciones de preprocesado saben cuál
+es la variable clase: no la transforman (no se normaliza ni se discretiza) y
+la usan automáticamente cuando hace falta, por ejemplo para calcular el AUC.
+
+## 3. Discretización
+
+La discretización transforma una variable numérica en una categórica,
+dividiendo su rango en intervalos. El paquete implementa dos algoritmos
+clásicos, **igual anchura** (*equal width*) e **igual frecuencia** (*equal
+frequency*).
+
+### 3.1. Igual anchura
+
+En la discretización por igual anchura el rango de la variable se divide en
+`num.bins` intervalos del mismo tamaño. En el siguiente ejemplo los valores
+van de 0.5 a 20.5, así que con 4 intervalos la anchura es 5 y los puntos de
+corte son 5.5, 10.5 y 15.5.
+
+```{r}
+x <- c(11.5, 10.2, 1.2, 0.5, 5.3, 20.5, 8.4)
+ew <- discretizeEW(x, num.bins = 4)
+ew$discretized
+ew$cut.points
+```
+
+La función devuelve el factor con los valores discretizados y los puntos de
+corte. El nombre de cada nivel indica los límites del intervalo. El primer
+intervalo empieza en `-Inf` y el último termina en `Inf`, para que cualquier
+valor nuevo tenga un intervalo asignado aunque quede fuera del rango original.
+
+### 3.2. Igual frecuencia
+
+En la discretización por igual frecuencia los puntos de corte se eligen para
+que en cada intervalo caiga el mismo número de valores (más o menos uno). Cada
+punto de corte se pone a mitad de camino entre el último valor de un intervalo
+y el primero del siguiente.
+
+```{r}
+ef <- discretizeEF(x, num.bins = 4)
+ef$discretized
+ef$cut.points
+table(ef$discretized)
+```
+
+Con 7 valores y 4 intervalos no se puede repartir exactamente, así que los
+intervalos tienen 2 o 1 valores. Si comparamos con la discretización por igual
+anchura se ve la diferencia: allí había 3 valores en el primer intervalo y 1 en
+el tercero.
+
+```{r}
+table(ew$discretized)
+```
+
+Los valores repetidos siempre van al mismo intervalo, porque un punto de corte
+solo se puede poner entre dos valores distintos. Si la posición de un corte cae
+entre dos valores iguales, el corte se mueve al hueco entre valores distintos
+más cercano. Si por ello dos cortes acaban en el mismo sitio, la función avisa
+y crea menos intervalos. Por ejemplo, si de 8 valores 5 son iguales a 1, no se
+pueden hacer 4 intervalos de 2 valores:
+
+```{r}
+repetidos <- discretizeEF(c(1, 1, 1, 1, 1, 2, 3, 4), num.bins = 4)
+repetidos$cut.points
+table(repetidos$discretized)
+```
+
+### 3.3. Discretizar con unos puntos de corte dados
+
+La función `discretize` aplica unos puntos de corte concretos. Es útil para
+discretizar datos nuevos con los mismos intervalos que se obtuvieron con los
+datos originales:
+
+```{r}
+nuevos.valores <- c(-3, 5.5, 12, 100)
+discretize(nuevos.valores, cut.points = ew$cut.points)
+```
+
+Un valor igual a un punto de corte (el 5.5) pertenece al intervalo de su
+izquierda, ya que los intervalos son de la forma (a, b].
+
+### 3.4. Discretizar un dataset completo
+
+`discretizeData` aplica cualquiera de los dos métodos a todas las variables
+numéricas de un dataset (las categóricas se dejan igual). Con un objeto
+`dataset`, la variable clase no se toca. Empezamos por igual anchura
+(`method = "EW"`, el valor por defecto):
+
+```{r}
+ds.ew <- discretizeData(ds, num.bins = 3, method = "EW")
+head(ds.ew$discretized$data)
+```
+
+Y ahora con igual frecuencia (`method = "EF"`):
+
+```{r}
+ds.disc <- discretizeData(ds, num.bins = 3, method = "EF")
+head(ds.disc$discretized$data)
+```
+
+Además del dataset discretizado, la función devuelve los puntos de corte de
+cada variable, por ejemplo los de la potencia (`hp`) con cada método:
+
+```{r}
+ds.ew$cut.points$hp
+ds.disc$cut.points$hp
+```
+
+La diferencia entre los dos métodos se ve bien en esta variable. Con igual
+anchura los tres intervalos miden lo mismo, pero como hay pocos coches muy
+potentes el último intervalo tiene muy pocos valores. Con igual frecuencia,
+en cambio, cada intervalo tiene más o menos el mismo número de coches:
+
+```{r}
+table(ds.ew$discretized$data$hp)
+table(ds.disc$discretized$data$hp)
+```
+
+Una forma de ver cómo han quedado las variables categóricas es la entropía
+normalizada (que veremos en el siguiente apartado), que vale 1 cuando los
+valores se reparten por igual entre todos los intervalos. `plotEntropy` la
+muestra en un diagrama de barras. Con igual frecuencia, las variables
+discretizadas quedan muy cerca de 1. La más baja es `carb` (0.97), porque
+tiene muchos valores repetidos y no se puede repartir del todo por igual: sus
+intervalos tienen 7, 13 y 12 coches (ver el apartado de decisiones de
+diseño). Las variables que ya eran categóricas (`cyl`, `vs`, `am` y `gear`) no
+cambian:
+
+```{r}
+plotEntropy(ds.disc$discretized)
+```
+
+## 4. Métricas de las variables
+
+### 4.1. Entropía
+
+La entropía mide la incertidumbre de una variable categórica:
+$H(X) = -\sum_i p_i \log_2(p_i)$, donde $p_i$ es la proporción de cada posible
+valor. Por ejemplo, con los valores posibles a, b y c y los datos
+a, a, c, c, c, las probabilidades son 0.4, 0 y 0.6:
+
+```{r}
+f <- factor(c("a", "a", "c", "c", "c"), levels = c("a", "b", "c"))
+entropy(f)
+```
+
+La entropía es 0 si la variable siempre toma el mismo valor y es máxima
+(`log2` del número de valores) cuando todos los valores son igual de
+frecuentes.
+
+### 4.2. Curva ROC y AUC
+
+El AUC (área bajo la curva ROC) mide lo bien que una variable numérica, por sí
+sola, separa las dos clases de una variable binaria. `calculateAUC` recibe un
+`data.frame` de dos columnas: la variable y la clase.
+
+```{r}
+auc.ejemplo <- data.frame(valor = c(0.1, 0.4, 0.35, 0.8),
+                          clase = c(FALSE, FALSE, TRUE, TRUE))
+resultado <- calculateAUC(auc.ejemplo)
+resultado$roc.points
+resultado$auc
+```
+
+Para cada posible punto de corte (los valores de la variable), las filas con
+valor mayor o igual se predicen como positivas. Comparando con la clase real se
+calcula la tasa de verdaderos positivos (TPR) y la de falsos positivos (FPR),
+que forman un punto de la curva. El área se calcula sumando los trapecios entre
+puntos consecutivos. La clase también puede ser un factor de dos niveles; en
+ese caso el positivo es el segundo nivel (en nuestros datos, `manual`).
+
+`plotROC` dibuja la curva. Por ejemplo, para el consumo (`mpg`) respecto al
+tipo de cambio:
+
+```{r, fig.width = 5.5, fig.height = 5}
+plotROC(ds$data[, c("mpg", "am")], main = "Curva ROC de mpg")
+```
+
+### 4.3. Métricas de todo el dataset
+
+`computeMetrics` reconoce el tipo de cada variable y calcula las métricas que
+le corresponden: **varianza y AUC** para las numéricas y **entropía** para las
+categóricas. Las que no corresponden aparecen como `NA`. Con un objeto
+`dataset` usa automáticamente su variable clase para el AUC:
+
+```{r}
+metricas <- computeMetrics(ds)
+metricas
+```
+
+Con un `data.frame` hay que indicar la clase con el argumento `class.name` (si
+no se indica, no se calcula el AUC):
+
+```{r}
+computeMetrics(coches, class.name = "am")[1:3, ]
+```
+
+El método `summary` de la clase `dataset` devuelve esta misma tabla:
+
+```{r}
+identical(summary(ds), metricas)
+```
+
+El AUC solo tiene sentido con una variable clase binaria. Si la clase tiene
+más de dos valores, como `Species` en `iris`, la función avisa y deja el AUC
+como `NA`, pero calcula igualmente el resto de métricas:
+
+```{r}
+summary(createDataset(iris, class.name = "Species"))
+```
+
+`plotAUC` muestra el AUC de todas las variables numéricas ordenado de mayor a
+menor:
+
+```{r}
+plotAUC(ds)
+```
+
+Las variables con un AUC alto (como `drat`, 0.90, o `mpg`, 0.83) toman
+valores altos en los coches con cambio manual. Las que tienen un AUC cercano a
+0 (como `wt`, 0.07) también separan muy bien las clases, pero al revés: los
+coches más pesados suelen ser automáticos. Las que están cerca de 0.5 (línea
+discontinua) no separan las clases al ordenar sus valores. Eso no siempre
+quiere decir que no tengan relación con la clase: el AUC no detecta, por
+ejemplo, que los coches de una clase estén en los dos extremos de la variable.
+
+## 5. Normalización y estandarización
+
+La **normalización** lleva los valores al rango [0, 1] restando el mínimo y
+dividiendo entre el rango. La **estandarización** resta la media y divide entre
+la desviación estándar, de modo que el resultado tiene media 0 y desviación
+estándar 1. Por ejemplo:
+
+```{r}
+v <- c(-0.29, 2.11, -3.84, 10.69, 5.30)
+
+v.norm <- normalize(v)
+v.norm
+range(v.norm)
+
+v.std <- standardize(v)
+v.std
+round(c(media = mean(v.std), desviacion = sd(v.std)), 10)
+```
+
+`normalizeData` y `standardizeData` aplican la transformación a todas las
+variables numéricas de un dataset. Las variables categóricas no se modifican
+y, en un objeto `dataset`, la clase tampoco:
+
+```{r}
+ds.norm <- normalizeData(ds)
+head(ds.norm$data)
+sapply(ds.norm$data[sapply(ds.norm$data, is.numeric)], range)
+```
+
+```{r}
+ds.std <- standardizeData(ds)
+round(sapply(ds.std$data[sapply(ds.std$data, is.numeric)], mean), 10)
+sapply(ds.std$data[sapply(ds.std$data, is.numeric)], sd)
+```
+
+Las variables originales tienen escalas muy distintas (por ejemplo `disp` llega
+a 472 y `wt` no pasa de 5.5). Después de estandarizarlas todas son
+comparables:
+
+```{r, fig.height = 4}
+numericas <- sapply(ds$data, is.numeric)
+layout(matrix(c(1, 2), nrow = 1))
+boxplot(ds$data[numericas], las = 2, main = "Datos originales")
+boxplot(ds.std$data[numericas], las = 2, main = "Datos estandarizados")
+layout(1)
+```
+
+## 6. Filtrado de variables
+
+`filterData` crea un nuevo dataset que solo contiene las variables que cumplen
+un requisito sobre una de las métricas (`"variance"`, `"auc"` o `"entropy"`).
+Por defecto se quedan las variables con un valor **mayor** que el umbral; con
+`greater = FALSE` se quedan las que tienen un valor **menor**. La variable
+clase se mantiene siempre.
+
+Por ejemplo, nos quedamos con las variables cuyo AUC es mayor que 0.8:
+
+```{r}
+ds.auc <- filterData(ds, metric = "auc", threshold = 0.8)
+names(ds.auc$data)
+```
+
+Solo quedan `mpg` y `drat`, además de la clase `am`: el resto de variables
+numéricas no llegan a 0.8, y las categóricas se eliminan porque el AUC no se
+les aplica. Si queremos conservar las variables a las que no se aplica la
+métrica, usamos `keep.others = TRUE`:
+
+```{r}
+names(filterData(ds, metric = "auc", threshold = 0.8, keep.others = TRUE)$data)
+```
+
+Como vimos antes, un AUC muy bajo también indica que la variable separa bien
+las clases, aunque al revés. Para quedarnos con las variables con AUC menor
+que 0.2:
+
+```{r}
+names(filterData(ds, metric = "auc", threshold = 0.2, greater = FALSE)$data)
+```
+
+El filtrado por entropía funciona igual, pero con las variables categóricas:
+
+```{r}
+names(filterData(ds, metric = "entropy", threshold = 1)$data)
+```
+
+Para aplicar varios requisitos basta con encadenar llamadas. Si las métricas
+son de tipos distintos hay que usar `keep.others = TRUE`, para que el primer
+filtro no elimine las variables del otro tipo. Por ejemplo, variables
+numéricas con AUC mayor que 0.8 y variables categóricas con entropía mayor
+que 1:
+
+```{r}
+ds.filtrado <- filterData(ds, metric = "auc", threshold = 0.8, keep.others = TRUE)
+ds.filtrado <- filterData(ds.filtrado, metric = "entropy", threshold = 1,
+                          keep.others = TRUE)
+names(ds.filtrado$data)
+```
+
+La función también funciona con un `data.frame`. Por ejemplo, variables con
+varianza mayor que 1 en `iris`:
+
+```{r}
+names(filterData(iris, metric = "variance", threshold = 1))
+```
+
+## 7. Correlación e información mutua
+
+Para estudiar la relación entre pares de variables, `computeCorrelations` tiene
+en cuenta el tipo de cada una:
+
+* Entre dos variables **numéricas** calcula la correlación de Pearson
+  (función `correlation`).
+* Entre dos variables **categóricas** calcula la información mutua (función
+  `mutualInformation`).
+
+Las dos funciones se pueden usar también por separado. La correlación está
+implementada a mano, y da el mismo resultado que la función `cor` de R:
+
+```{r}
+correlation(coches$mpg, coches$wt)
+cor(coches$mpg, coches$wt)
+```
+
+La información mutua se calcula como $I(X;Y) = H(X) + H(Y) - H(X,Y)$, a partir
+de la entropía de cada variable y de la entropía conjunta. Vale 0 si las
+variables son independientes, y la información mutua de una variable consigo
+misma es su entropía:
+
+```{r}
+mutualInformation(coches$cyl, coches$vs)
+mutualInformation(coches$cyl, coches$cyl)
+entropy(coches$cyl)
+```
+
+Como la correlación y la información mutua tienen escalas distintas,
+`computeCorrelations` devuelve dos matrices: una con las correlaciones entre
+las variables numéricas y otra con la información mutua entre las
+categóricas. En un objeto `dataset` la variable clase también se incluye.
+
+```{r}
+relaciones <- computeCorrelations(ds)
+round(relaciones$correlation, 2)
+round(relaciones$mutual.information, 3)
+```
+
+`plotCorrelation` dibuja cualquiera de las dos matrices como un mapa de calor:
+
+```{r, fig.width = 6.5, fig.height = 6}
+plotCorrelation(ds, type = "correlation")
+```
+
+```{r, fig.width = 5.5, fig.height = 5}
+plotCorrelation(ds, type = "mutual.information")
+```
+
+Si queremos ver la relación de las variables numéricas con la clase mediante la
+información mutua, podemos discretizarlas antes. Así todas las variables son
+categóricas:
+
+```{r, fig.width = 7.5, fig.height = 7}
+plotCorrelation(ds.disc$discretized, type = "mutual.information",
+                main = "Información mutua (variables discretizadas)")
+```
+
+## 8. Guardar y leer datasets en formato propio
+
+Al guardar un dataset en un CSV se pierde parte de la información: qué
+variables son factores (y sus niveles), cuál es la variable clase, etc. Por
+eso el paquete incluye un formato de texto propio: `writeDataset` guarda una
+cabecera con esa información y después los datos en formato CSV:
+
+```{r}
+fichero.dts <- tempfile(fileext = ".dts")
+writeDataset(ds, fichero.dts)
+cat(head(readLines(fichero.dts), 10), sep = "\n")
+```
+
+`readDataset` lee el fichero y reconstruye el objeto `dataset` con los mismos
+tipos, niveles, variable clase y nombre:
+
+```{r}
+ds.leido <- readDataset(fichero.dts)
+ds.leido$name
+ds.leido$class.name
+levels(ds.leido$data$am)
+all.equal(ds$data, ds.leido$data)
+```
+
+## 9. Decisiones de diseño
+
+En este apartado se recogen las decisiones de implementación que no son
+evidentes, junto con el motivo de cada una.
+
+**Discretización**
+
+* Los intervalos son de la forma (a, b], así que un valor igual a un punto de
+  corte pertenece al intervalo de su izquierda. El primero empieza en `-Inf` y
+  el último termina en `Inf` para poder discretizar valores nuevos que queden
+  fuera del rango original.
+* En igual anchura, los puntos de corte son
+  `min(x) + i * (max(x) - min(x)) / num.bins`. Si la variable es constante la
+  anchura es 0 y no se puede dividir el rango: se avisa y todos los valores
+  quedan en un único intervalo, `(-Inf, Inf)`.
+* En igual frecuencia se ordenan los valores, el intervalo `i` termina en la
+  posición `round(i * n / num.bins)` y el punto de corte se pone a mitad de
+  camino entre ese valor y el siguiente. Cualquier valor entre los dos
+  separaría igual los datos; el punto medio es la opción más neutra para
+  discretizar valores nuevos. Sin valores repetidos, todos los intervalos
+  tienen el mismo número de valores, más o menos uno.
+* Un mismo valor no se puede repartir entre dos intervalos, así que un punto
+  de corte solo se puede poner entre dos valores distintos. Si la posición
+  calculada cae entre dos valores iguales, el corte se mueve al hueco entre
+  valores distintos más cercano a la posición ideal (`i * n / num.bins`). Con
+  valores repetidos las frecuencias pueden quedar algo descompensadas (como en
+  `carb`, con 7, 13 y 12 coches), pero nunca queda ningún intervalo vacío. Si
+  dos cortes acaban en el mismo hueco se elimina uno, se avisa y se obtienen
+  menos intervalos de los pedidos; si todos los valores son iguales, se crea un
+  único intervalo.
+* Los nombres de los intervalos se redondean a 4 cifras significativas para
+  que se lean bien (por ejemplo, `(146.3, 240.7]`); los puntos de corte
+  exactos son los que devuelven las funciones en `cut.points`.
+
+**Métricas**
+
+* La entropía se mide en bits (`log2`). Las
+  probabilidades se calculan para todos los niveles del factor; los que no
+  aparecen en los datos tienen probabilidad 0 y no suman nada. La entropía
+  normalizada se obtiene dividiendo entre `log2` del número de niveles.
+* La varianza y la desviación típica son las muestrales (dividen entre
+  `n - 1`), las que calculan las funciones `var` y `sd` de R.
+* En el AUC, una fila se predice como positiva si su valor es mayor o igual
+  que el punto de corte, y solo se usan como cortes los valores de los datos,
+  ya que son los únicos que cambian el TPR y el FPR. La curva empieza en
+  (0, 0) y el área se calcula sumando trapecios (regla del trapecio). Cuando
+  hay valores empatados entre las
+  dos clases, la curva tiene un tramo en diagonal, lo que equivale a contar
+  esos pares como medio acierto.
+* La clase positiva es `TRUE` en una clase lógica, el segundo nivel en un
+  factor y el valor mayor en una variable 0/1. Un AUC menor que 0.5 indica que
+  los valores bajos de la variable se asocian a la clase positiva; para
+  quedarse con esas variables al filtrar se usa `greater = FALSE`.
+* Un AUC cercano a 0.5 indica que ordenar por la variable no separa las
+  clases, pero no que la variable no tenga ninguna relación con ellas: el AUC
+  no detecta, por ejemplo, que los positivos estén en los dos extremos de la
+  variable.
+* Si la variable clase no es binaria, `computeMetrics` (y `summary`) calcula la
+  varianza y la entropía y deja el AUC como `NA`. En cambio, `filterData` con
+  `metric = "auc"` y `plotAUC` necesitan una clase binaria y dan un error.
+
+**Filtrado**
+
+* Por defecto, `filterData` devuelve solo las variables que cumplen el
+  requisito, además de la variable clase, que se mantiene siempre. Con
+  `keep.others = TRUE` se conservan también las variables a las que no se
+  aplica la métrica, lo que permite encadenar filtros sobre métricas
+  distintas.
+* Si ninguna variable cumple el requisito, el resultado solo tiene la variable
+  clase, y sus métricas (`computeMetrics` o `summary`) son una tabla sin filas.
+
+**Tipos de variables**
+
+* Son numéricas las variables `numeric` e `integer`, y categóricas las de tipo
+  `factor` y `logical`. Los textos (`character`) no se tratan como
+  categóricos, porque suelen ser nombres o identificadores con un valor
+  distinto en cada fila; `readCSV` ya convierte en factor las columnas que
+  tienen pocos valores distintos.
+* Las funciones usan el tipo que tiene cada columna en R, no lo que significa:
+  una categoría codificada con números se trata como numérica hasta que se
+  convierte con `factor()` (ver el apartado 1). La regla de `readCSV` es
+  aproximada, así que a veces hay que corregir el tipo a mano.
+* La normalización y la estandarización solo se aplican a las variables
+  numéricas. Si una variable es constante no se puede dividir entre su rango o
+  su desviación típica (valen 0), así que se devuelve un vector de ceros y se
+  avisa.
+* La correlación y la información mutua miden cosas distintas y tienen
+  escalas diferentes, así que `computeCorrelations` devuelve dos matrices: la
+  correlación de Pearson entre variables numéricas y la información mutua
+  entre variables categóricas. Los pares formados por una variable numérica y
+  otra categórica no se comparan; para relacionarlas se puede discretizar
+  antes la variable numérica, como se ha hecho en el apartado 7. La
+  correlación de una variable constante no está definida y vale `NA`.
+
+**Otras decisiones**
+
+* Para simplificar, el paquete no admite valores perdidos (`NA`) ni
+  infinitos: las funciones dan un error si los encuentran en los datos que
+  tienen que usar (por ejemplo, en una variable numérica o en la variable
+  clase), y `writeDataset` no guarda datos con `NA`. Así, un `NA` en la tabla
+  de métricas indica que esa métrica no se aplica a la variable, salvo en un
+  caso: con una sola observación la varianza muestral no está definida
+  (necesita al menos dos valores) y también vale `NA`.
+* Los algoritmos de discretización, entropía, AUC, correlación e información
+  mutua están implementados con funciones básicas de R (`sort`, `order`,
+  `sum`, `sapply`...), sin usar funciones que ya los resuelvan, como `cut`,
+  `quantile`, `cor` o `table`. En esta viñeta, `cor` y `table` solo se usan
+  para comprobar o mostrar resultados.
+* Los gráficos usan las funciones gráficas de R base, así que el paquete no
+  depende de ningún paquete externo.
+
+## 10. Resumen
+
+Un flujo de trabajo típico con el paquete sería:
+
+```{r}
+datos <- createDataset(readCSV(fichero.csv), class.name = "am")
+datos <- standardizeData(datos)
+datos <- filterData(datos, metric = "auc", threshold = 0.75)
+computeMetrics(datos)
+```
+
+Todas las funciones tienen su página de ayuda con la descripción de los
+argumentos, lo que devuelven y ejemplos de uso (por ejemplo `?discretizeEF` o
+`?computeMetrics`). La ayuda general del paquete está en `?dataprepR`.
